@@ -41,10 +41,11 @@ func (e *OperationRefusalError) Error() string { return e.Code }
 type OperationFamily string
 
 const (
-	OperationFamilySources OperationFamily = "sources"
-	OperationFamilyRecords OperationFamily = "records"
-	OperationFamilyLoops   OperationFamily = "loops"
-	OperationFamilyCurated OperationFamily = "curated"
+	OperationFamilySources    OperationFamily = "sources"
+	OperationFamilyRecords    OperationFamily = "records"
+	OperationFamilyLoops      OperationFamily = "loops"
+	OperationFamilyCurated    OperationFamily = "curated"
+	OperationFamilyAttributes OperationFamily = "attributes"
 )
 
 type operationalDefinition struct {
@@ -61,7 +62,11 @@ type chunkedOperation struct {
 // Roots are built once, independent of capability combinations. Selecting any
 // subset retains pointer identity for the official SDK's shared schema cache.
 var fixedOperationalDefinitions = sync.OnceValue(func() []operationalDefinition {
-	return append(append(append(append(sourceOperationalDefinitions(), loopOperationalDefinitions()...), deletionReviewOperationalDefinitions()...), personRecordDefinitions()...), personExportDefinitions()...)
+	definitions := append(sourceOperationalDefinitions(), loopOperationalDefinitions()...)
+	definitions = append(definitions, deletionReviewOperationalDefinitions()...)
+	definitions = append(definitions, personRecordDefinitions()...)
+	definitions = append(definitions, personExportDefinitions()...)
+	return append(definitions, recordAttributeDefinitions()...)
 })
 
 func operationalCatalog(opts ServeOptions, allowWrites bool) []operationalDefinition {
