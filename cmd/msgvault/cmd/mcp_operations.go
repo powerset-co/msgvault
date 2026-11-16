@@ -102,6 +102,8 @@ func (b *daemonMCPOperations) ExecuteOperation(ctx context.Context, name string,
 func (b *daemonMCPOperations) OperationDisclosure(ctx context.Context, name string, args map[string]any) (string, error) {
 	if slices.Contains(b.supported, name) {
 		if disclosure, handled, err := b.personRecordDisclosure(ctx, name, args); handled {
+			return disclosure, err
+		}
 		if disclosure, handled, err := b.recordAttributeDisclosure(ctx, name, args); handled {
 			return disclosure, err
 		}
