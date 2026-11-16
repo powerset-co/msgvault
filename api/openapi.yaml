@@ -15344,6 +15344,8 @@ components:
         confidence:
           format: double
           type: number
+        expected_empty:
+          type: boolean
         expected_value_id:
           format: int64
           type: integer
