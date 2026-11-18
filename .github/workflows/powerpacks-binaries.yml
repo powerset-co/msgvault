@@ -26,8 +26,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14, goos: darwin, goarch: arm64, cc: "" }
-          - { runner: macos-14, goos: darwin, goarch: amd64, cc: "clang -arch x86_64" }
+          - { runner: macos-15, goos: darwin, goarch: arm64, cc: "" }
+          - { runner: macos-15, goos: darwin, goarch: amd64, cc: "clang -arch x86_64" }
           - { runner: ubuntu-latest, goos: linux, goarch: amd64, cc: "" }
           - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64, cc: "" }
     runs-on: ${{ matrix.runner }}
