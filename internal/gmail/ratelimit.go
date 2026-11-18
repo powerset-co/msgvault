@@ -135,6 +135,12 @@ func newRateLimiter(clk Clock, qps float64) *RateLimiter {
 	if clk == nil {
 		panic("gmail: RateLimiter requires a non-nil Clock")
 	}
+	// rate_limit_qps = 0 is "not set": run at the default pace. Powerpacks writes 0
+	// so the same config also keeps an upstream msgvault under the quota (there 0
+	// is raised to MinQPS).
+	if qps <= 0 {
+		qps = defaultQPS
+	}
 	if qps < MinQPS {
 		qps = MinQPS
 	}

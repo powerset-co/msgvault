@@ -277,6 +277,12 @@ func TestNewRateLimiter_ScaledQPS(t *testing.T) {
 	assert.InDelta(t, DefaultRefillRate, rl.refillRate, 1e-9, "refillRate at 10 QPS (capped)")
 }
 
+func TestNewRateLimiter_ZeroQPSIsTheDefaultPace(t *testing.T) {
+	zero := NewRateLimiter(0)
+	def := NewRateLimiter(defaultQPS)
+	assert.InDelta(t, def.refillRate, zero.refillRate, 1e-9, "rate_limit_qps = 0 runs at the default pace")
+}
+
 func TestNewRateLimiter_NilClockPanics(t *testing.T) {
 	assert.Panics(t, func() {
 		newRateLimiter(nil, 5.0)

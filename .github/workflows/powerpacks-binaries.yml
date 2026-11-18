@@ -1,0 +1,82 @@
+name: powerpacks-binaries
+
+# Build msgvault per platform and attach the archives to the tag's GitHub Release so the
+# Powerpacks app build (desktop/scripts/bundle-runtime.sh) can download the pinned fork:
+# msgvault_<version>_<os>_<arch>.tar.gz holding `msgvault`, plus SHA256SUMS, the names the
+# upstream releases use. CGo (sqlite, duckdb) is compiled natively on each runner. The web UI
+# is not built: Powerpacks does not use it, and the tree carries a stub page for the embed.
+# Triggers only on our -powerset tags.
+
+on:
+  push:
+    tags:
+      - "v*-powerset.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.22.0-powerset.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, goos: darwin, goarch: arm64, cc: "" }
+          - { runner: macos-14, goos: darwin, goarch: amd64, cc: "clang -arch x86_64" }
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, cc: "" }
+          - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64, cc: "" }
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build (native CGo)
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc }}
+        run: |
+          version="${TAG#v}"
+          pkg=go.kenn.io/msgvault/cmd/msgvault/cmd
+          ldflags="-s -w -X $pkg.Version=$version -X $pkg.Commit=$(git rev-parse --short HEAD) -X $pkg.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # The same tags the upstream Makefile builds with.
+          go build -trimpath -tags "fts5 sqlite_vec" -ldflags "$ldflags" -o msgvault ./cmd/msgvault
+          if [ "$(go env GOHOSTARCH)" = "$GOARCH" ]; then ./msgvault version; fi
+          tar -czf "msgvault_${version}_${GOOS}_${GOARCH}.tar.gz" msgvault
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msgvault-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: msgvault_*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        run: |
+          cd dist
+          sha256sum msgvault_*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" --prerelease \
+              --notes "msgvault for Powerpacks: Gmail pacing for Google's 2026 quota. Built from $TAG."
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber msgvault_*.tar.gz SHA256SUMS
