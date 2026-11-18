@@ -226,17 +226,17 @@ func TestOperationCost(t *testing.T) {
 		op   Operation
 		cost int
 	}{
-		{OpMessagesGet, 5},
-		{OpMessagesGetRaw, 5},
+		{OpMessagesGet, 20},
+		{OpMessagesGetRaw, 60},
 		{OpMessagesList, 5},
 		{OpLabelsList, 1},
 		{OpHistoryList, 2},
-		{OpMessagesTrash, 5},
+		{OpMessagesTrash, 20},
 		{OpMessagesDelete, 10},
 		{OpMessagesBatchDelete, 50},
 		{OpProfile, 1},
 		{OpDraftsCreate, 10},
-		{OpDraftsGet, 20},
+		{OpDraftsGet, 60},
 		{OpDraftsUpdate, 15},
 		{OpDraftsDelete, 10},
 		{OpSendAsList, 1},
@@ -352,8 +352,8 @@ func TestRateLimiter_Refill(t *testing.T) {
 
 	f.assertAvailable(t, 0)
 
-	// Advance clock by 1 second: should refill 250 tokens
-	f.clk.Advance(1 * time.Second)
+	// Advance clock by 2 seconds: 190 tokens refilled, capped at the 120 capacity
+	f.clk.Advance(2 * time.Second)
 
 	f.assertAvailable(t, DefaultCapacity)
 }
@@ -363,9 +363,9 @@ func TestRateLimiter_Available(t *testing.T) {
 
 	f.assertAvailable(t, DefaultCapacity)
 
-	f.rl.TryAcquire(OpMessagesGet) // cost 5
+	f.rl.TryAcquire(OpMessagesGet) // cost 20
 
-	f.assertAvailable(t, float64(DefaultCapacity-5))
+	f.assertAvailable(t, float64(DefaultCapacity-20))
 }
 
 func TestRateLimiter_Concurrent(t *testing.T) {
@@ -504,4 +504,21 @@ func TestMockClock_ZeroValueSafe(t *testing.T) {
 
 	// timerNotify should be lazily initialized
 	require.NotNil(t, clk.timerNotify, "timerNotify should be initialized after After() call")
+}
+
+// A minute of raw message reads at the default rate stays under Gmail's 6,000
+// units per user per minute, burst included, and still reaches 95% of it.
+func TestRateLimiter_RawReadsStayUnderPerMinuteQuota(t *testing.T) {
+	f := newRLFixture()
+
+	units := 0
+	for range 600 {
+		for f.rl.TryAcquire(OpMessagesGetRaw) {
+			units += OpMessagesGetRaw.Cost()
+		}
+		f.clk.Advance(100 * time.Millisecond)
+	}
+
+	assert.LessOrEqual(t, units, 6000, "units spent in one minute")
+	assert.GreaterOrEqual(t, units, 5700, "units spent in one minute")
 }

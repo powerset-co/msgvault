@@ -741,8 +741,13 @@ func (c *Client) ListCompleteMessageSnapshot(ctx context.Context, pageToken stri
 
 func (c *Client) listMessages(ctx context.Context, query, pageToken string, includeSpamTrash bool) (*MessageListResponse, error) {
 	params := url.Values{}
-	params.Set("maxResults", "500")
+	// A sync page ends with a checkpoint and a progress report. Raw reads run at
+	// about 95 a minute under Gmail's per-user quota, so a 100-message page
+	// reports about once a minute where a 500-message page took five. The
+	// snapshot only lists, so it keeps Gmail's largest page.
+	params.Set("maxResults", "100")
 	if includeSpamTrash {
+		params.Set("maxResults", "500")
 		params.Set("includeSpamTrash", "true")
 	}
 	if query != "" {

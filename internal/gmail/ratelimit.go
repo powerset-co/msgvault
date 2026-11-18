@@ -12,16 +12,19 @@ type Clock interface {
 	After(d time.Duration) <-chan time.Time
 }
 
-// Operation represents a Gmail API operation with its quota cost.
+// Operation represents a Gmail API operation with its quota cost. The costs are
+// the ones Google charges projects created on or after 2026-05-01
+// (https://developers.google.com/workspace/gmail/api/reference/quota): a
+// message read costs 20 units, 60 when its format is full, raw or html.
 type Operation int
 
 const (
-	OpMessagesGet         Operation = iota // 5 units
-	OpMessagesGetRaw                       // 5 units
+	OpMessagesGet         Operation = iota // 20 units
+	OpMessagesGetRaw                       // 60 units (format=raw)
 	OpMessagesList                         // 5 units
 	OpLabelsList                           // 1 unit
 	OpHistoryList                          // 2 units
-	OpMessagesTrash                        // 5 units
+	OpMessagesTrash                        // 20 units
 	OpMessagesDelete                       // 10 units
 	OpMessagesBatchDelete                  // 50 units
 	OpProfile                              // 1 unit
@@ -37,7 +40,7 @@ const (
 	OpEventsList       // 1 unit
 	OpEventsGet        // 1 unit
 	OpDraftsCreate     // 10 units
-	OpDraftsGet        // 20 units
+	OpDraftsGet        // 60 units (format=raw)
 	OpDraftsUpdate     // 15 units
 	OpDraftsDelete     // 10 units
 	OpSendAsList       // 1 unit
@@ -47,7 +50,11 @@ const (
 // Cost returns the quota cost for an operation.
 func (o Operation) Cost() int {
 	switch o {
-	case OpMessagesGet, OpMessagesGetRaw, OpMessagesList, OpMessagesTrash, OpMessagesModify:
+	case OpMessagesGetRaw, OpDraftsGet:
+		return 60
+	case OpMessagesGet, OpMessagesTrash:
+		return 20
+	case OpMessagesList, OpMessagesModify:
 		return 5
 	case OpMessagesDelete:
 		return 10
@@ -57,8 +64,6 @@ func (o Operation) Cost() int {
 		return 2
 	case OpDraftsCreate, OpDraftsDelete:
 		return 10
-	case OpDraftsGet:
-		return 20
 	case OpDraftsUpdate:
 		return 15
 	default:
@@ -75,11 +80,14 @@ func (o Operation) remoteMutation() bool {
 	}
 }
 
-// DefaultCapacity is the default token bucket capacity (Gmail's per-user quota).
-const DefaultCapacity = 250
+// DefaultCapacity is the default token bucket capacity: two raw message reads.
+// Gmail counts a user's units per minute (6,000), so the burst and a minute of
+// refill together must stay under that: 120 + 60*95 = 5,820.
+const DefaultCapacity = 120
 
-// DefaultRefillRate is tokens per second at the default rate.
-const DefaultRefillRate = 250.0
+// DefaultRefillRate is tokens per second at the default rate: 95% of Gmail's
+// 6,000 units per user per minute (100 a second), about 95 raw reads a minute.
+const DefaultRefillRate = 95.0
 
 const (
 	// defaultQPS is the baseline QPS used to calculate the scale factor.
@@ -149,9 +157,9 @@ func newRateLimiter(clk Clock, qps float64) *RateLimiter {
 
 // NewRateLimiterWithCapacity creates a token-bucket limiter with an explicit
 // bucket capacity and refill rate (tokens/second), bypassing the Gmail-tuned
-// NewRateLimiter defaults (capacity=250, refill scaled from QPS). This lets a
+// NewRateLimiter defaults (capacity=120, refill scaled from QPS). This lets a
 // Google API with a different per-user budget use a correctly-sized bucket
-// instead of inheriting Gmail's 250-token instant burst — e.g. the Calendar
+// instead of inheriting Gmail's 120-token instant burst — e.g. the Calendar
 // API at 600 req/min/user is built with capacity=10, refillRate=8 (80% of the
 // 10 req/s sustained ceiling, leaving headroom for jitter and retries).
 // capacity is clamped to >=1 and refillRate to >= MinQPS.
