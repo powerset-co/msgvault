@@ -500,3 +500,43 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	req.URL.Host = strings.TrimPrefix(t.base, "http://")
 	return t.wrapped.RoundTrip(req)
 }
+
+// laneClient is a client whose requests reach srv and carry name, standing in
+// for a sign-in through one Google project.
+func laneClient(srv *httptest.Server, name string, opts ...ClientOption) *Client {
+	c := NewClient(nil, opts...)
+	c.httpClient = &http.Client{Transport: &rewriteTransport{base: srv.URL, wrapped: laneHeader{name}}}
+	return c
+}
+
+type laneHeader struct{ name string }
+
+func (l laneHeader) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("X-Lane", l.name)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func TestGetMessageRawTakesTurnsAcrossQuotaLanesAndDropsARefusedOne(t *testing.T) {
+	var mu sync.Mutex
+	served := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lane := r.Header.Get("X-Lane")
+		if lane == "revoked" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		mu.Lock()
+		served[lane]++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "m", "raw": ""})
+	}))
+	defer srv.Close()
+
+	client := laneClient(srv, "main", WithQuotaLanes(laneClient(srv, "second"), laneClient(srv, "revoked")))
+	for range 7 {
+		_, err := client.GetMessageRaw(context.Background(), "m")
+		require.NoError(t, err)
+	}
+	// Turns: main, second, revoked (refused once, read by main, dropped), then main and second alternate.
+	assert.Equal(t, map[string]int{"main": 4, "second": 3}, served)
+}

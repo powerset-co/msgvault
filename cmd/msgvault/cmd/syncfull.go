@@ -306,11 +306,27 @@ func buildAPIClient(ctx context.Context, src *store.Source, getOAuthMgr func(ctx
 				return nil, err
 			}
 		}
-		rateLimiter := gmail.NewRateLimiter(float64(cfg.Sync.RateLimitQPS))
-		return gmail.NewClient(tokenSource,
-			gmail.WithLogger(logger),
-			gmail.WithRateLimiter(rateLimiter),
-		), nil
+		newClient := func(ts oauth2.TokenSource, opts ...gmail.ClientOption) *gmail.Client {
+			opts = append(opts, gmail.WithLogger(logger),
+				gmail.WithRateLimiter(gmail.NewRateLimiter(float64(cfg.Sync.RateLimitQPS))))
+			return gmail.NewClient(ts, opts...)
+		}
+		// Each quota app the mailbox is authorized on reads at its own pace.
+		var lanes []*gmail.Client
+		for _, app := range cfg.Sync.QuotaApps {
+			mgr, err := getOAuthMgr(ctx, app)
+			if err != nil {
+				logger.Warn("Gmail quota app skipped", "app", app, "error", err)
+				continue
+			}
+			ts, err := mgr.WithTokenNamespace(quotaTokenNamespace(app)).TokenSource(ctx, src.Identifier)
+			if err != nil {
+				logger.Debug("Gmail quota app not authorized for account", "app", app, "error", err)
+				continue
+			}
+			lanes = append(lanes, newClient(ts))
+		}
+		return newClient(tokenSource, gmail.WithQuotaLanes(lanes...)), nil
 
 	case sourceTypeIMAP:
 		if !src.SyncConfig.Valid || src.SyncConfig.String == "" {

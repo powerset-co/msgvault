@@ -836,6 +836,10 @@ func (c *MicrosoftConfig) EffectiveTenantID() string {
 // SyncConfig holds sync-related configuration.
 type SyncConfig struct {
 	RateLimitQPS int `toml:"rate_limit_qps"`
+	// QuotaApps names extra [oauth.apps.<name>] Google projects a Gmail sync
+	// also reads through, each with its own per-user quota. A mailbox uses the
+	// ones it was authorized on with `msgvault add-quota-app`.
+	QuotaApps []string `toml:"quota_apps"`
 	// ArchiveRemoteImages opts into sender-controlled HTTP requests, which
 	// can activate tracking pixels. Unset is deliberately false.
 	ArchiveRemoteImages bool `toml:"archive_remote_images"`
