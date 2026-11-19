@@ -78,6 +78,9 @@ func WithConcurrency(n int) ClientOption {
 func WithQuotaLanes(lanes ...*Client) ClientOption {
 	return func(c *Client) {
 		c.lanes = lanes
+		// Ten requests at once carry about 12 raw reads a second, which held ten
+		// projects to 717 messages a minute where their pace allows 950.
+		c.concurrency = max(c.concurrency, 2*(len(lanes)+1))
 	}
 }
 
