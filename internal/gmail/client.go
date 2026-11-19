@@ -50,10 +50,16 @@ type Client struct {
 	// lanes are extra sign-ins to the same mailbox, each through its own Google
 	// project and so each with its own per-user quota. Raw message reads take
 	// turns across this client and its lanes.
-	lanesMu  sync.Mutex
-	lanes    []*Client
-	nextLane int
+	lanesMu     sync.Mutex
+	lanes       []*Client
+	nextLane    int
+	newLanes    func() []*Client // lanes that became ready since the last ask
+	lanesAsked  time.Time
+	laneWorkers int // concurrency before any lane joined
 }
+
+// laneRefresh is how often a running sync asks for quota lanes that became ready.
+const laneRefresh = 30 * time.Second
 
 // ClientOption configures a Client.
 type ClientOption func(*Client)
@@ -72,15 +78,15 @@ func WithConcurrency(n int) ClientOption {
 	}
 }
 
-// WithQuotaLanes adds clients signed in to the same mailbox through other
-// Google projects. Raw message reads rotate across them; a lane Google refuses
-// is dropped for the rest of the run and its read goes to this client.
-func WithQuotaLanes(lanes ...*Client) ClientOption {
+// WithQuotaLanes names where to get clients signed in to the same mailbox
+// through other Google projects. Raw message reads rotate across them; a lane
+// Google refuses is dropped for the rest of the run and its read goes to this
+// client. newLanes is asked at the first read and every laneRefresh after, and
+// returns only lanes it has not returned before, so a project set up while the
+// sync runs joins it.
+func WithQuotaLanes(newLanes func() []*Client) ClientOption {
 	return func(c *Client) {
-		c.lanes = lanes
-		// Ten requests at once carry about 12 raw reads a second, which held ten
-		// projects to 717 messages a minute where their pace allows 950.
-		c.concurrency = max(c.concurrency, 2*(len(lanes)+1))
+		c.newLanes = newLanes
 	}
 }
 
@@ -822,6 +828,16 @@ func (c *Client) GetMessageRaw(ctx context.Context, messageID string) (*RawMessa
 func (c *Client) pickLane() *Client {
 	c.lanesMu.Lock()
 	defer c.lanesMu.Unlock()
+	if c.newLanes != nil && time.Since(c.lanesAsked) >= laneRefresh {
+		c.lanesAsked = time.Now()
+		if c.laneWorkers == 0 {
+			c.laneWorkers = c.concurrency
+		}
+		c.lanes = append(c.lanes, c.newLanes()...)
+		// Ten requests at once carry about 12 raw reads a second, which held ten
+		// projects to 717 messages a minute where their pace allows 950.
+		c.concurrency = max(c.laneWorkers, 2*(len(c.lanes)+1))
+	}
 	turn := c.nextLane % (len(c.lanes) + 1)
 	c.nextLane++
 	if turn == 0 {
@@ -910,7 +926,9 @@ func (c *Client) GetMessagesRawBatchWithErrors(ctx context.Context, messageIDs [
 	for i, id := range messageIDs {
 		results[i].ID = id
 	}
+	c.lanesMu.Lock()
 	sem := make(chan struct{}, c.concurrency)
+	c.lanesMu.Unlock()
 
 	g, ctx := errgroup.WithContext(ctx)
 

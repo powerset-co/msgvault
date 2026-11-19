@@ -311,22 +311,33 @@ func buildAPIClient(ctx context.Context, src *store.Source, getOAuthMgr func(ctx
 				gmail.WithRateLimiter(gmail.NewRateLimiter(float64(cfg.Sync.RateLimitQPS))))
 			return gmail.NewClient(ts, opts...)
 		}
-		// Each quota app the mailbox is authorized on reads at its own pace.
-		var lanes []*gmail.Client
-		for _, app := range cfg.Sync.QuotaApps {
-			mgr, err := getOAuthMgr(ctx, app)
-			if err != nil {
-				logger.Warn("Gmail quota app skipped", "app", app, "error", err)
-				continue
+		// Each quota app the mailbox is authorized on reads at its own pace. An app
+		// whose client or sign-in is not there yet is asked again later, so one set
+		// up while the sync runs joins it.
+		joined := map[string]bool{}
+		newLanes := func() []*gmail.Client {
+			var lanes []*gmail.Client
+			for _, app := range cfg.Sync.QuotaApps {
+				if joined[app] {
+					continue
+				}
+				mgr, err := getOAuthMgr(ctx, app)
+				if err != nil {
+					logger.Debug("Gmail quota app not ready", "app", app, "error", err)
+					continue
+				}
+				ts, err := mgr.WithTokenNamespace(quotaTokenNamespace(app)).TokenSource(ctx, src.Identifier)
+				if err != nil {
+					logger.Debug("Gmail quota app not authorized for account", "app", app, "error", err)
+					continue
+				}
+				joined[app] = true
+				logger.Info("Gmail quota app joined the sync", "app", app)
+				lanes = append(lanes, newClient(ts))
 			}
-			ts, err := mgr.WithTokenNamespace(quotaTokenNamespace(app)).TokenSource(ctx, src.Identifier)
-			if err != nil {
-				logger.Debug("Gmail quota app not authorized for account", "app", app, "error", err)
-				continue
-			}
-			lanes = append(lanes, newClient(ts))
+			return lanes
 		}
-		return newClient(tokenSource, gmail.WithQuotaLanes(lanes...)), nil
+		return newClient(tokenSource, gmail.WithQuotaLanes(newLanes)), nil
 
 	case sourceTypeIMAP:
 		if !src.SyncConfig.Valid || src.SyncConfig.String == "" {

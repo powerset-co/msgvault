@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -532,11 +533,30 @@ func TestGetMessageRawTakesTurnsAcrossQuotaLanesAndDropsARefusedOne(t *testing.T
 	}))
 	defer srv.Close()
 
-	client := laneClient(srv, "main", WithQuotaLanes(laneClient(srv, "second"), laneClient(srv, "revoked")))
+	asked := 0
+	client := laneClient(srv, "main", WithQuotaLanes(func() []*Client {
+		asked++
+		switch asked {
+		case 1:
+			return []*Client{laneClient(srv, "second"), laneClient(srv, "revoked")}
+		case 2:
+			return []*Client{laneClient(srv, "late")}
+		}
+		return nil
+	}))
 	for range 7 {
 		_, err := client.GetMessageRaw(context.Background(), "m")
 		require.NoError(t, err)
 	}
 	// Turns: main, second, revoked (refused once, read by main, dropped), then main and second alternate.
 	assert.Equal(t, map[string]int{"main": 4, "second": 3}, served)
+
+	// A lane that becomes ready while the sync runs joins at the next ask.
+	client.lanesAsked = time.Time{}
+	for range 3 {
+		_, err := client.GetMessageRaw(context.Background(), "m")
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, served["late"])
+	assert.Equal(t, 10, client.concurrency)
 }
