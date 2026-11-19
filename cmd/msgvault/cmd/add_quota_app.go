@@ -18,7 +18,7 @@ var addQuotaAppCmd = &cobra.Command{
 	Use:   "add-quota-app <email>",
 	Short: "Authorize a Gmail account on an extra Google project for more sync quota",
 	Long: `Gmail counts its per-user quota per Google project. This signs the account
-in, read-only, through another configured [oauth.apps.<name>] project. Projects
+in through another configured [oauth.apps.<name>] project. Projects
 listed in [sync] quota_apps then share a sync's message downloads.`,
 	Example: `  msgvault add-quota-app you@gmail.com --oauth-app quota2`,
 	Args:    validateAddAccountArgs,
@@ -36,7 +36,7 @@ listed in [sync] quota_apps then share a sync's message downloads.`,
 			return err
 		}
 		mgr, err := oauth.NewManagerWithCredentials(cmd.Context(), credentials, cfg.TokensDir(),
-			cfg.OAuth.Tokens, state.logger, oauth.ScopesGmailReadonly)
+			cfg.OAuth.Tokens, state.logger, oauth.Scopes)
 		if err != nil {
 			return wrapOAuthError(fmt.Errorf("create oauth manager: %w", err), cfg)
 		}
