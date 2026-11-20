@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -499,4 +500,63 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	req.URL.Scheme = "http"
 	req.URL.Host = strings.TrimPrefix(t.base, "http://")
 	return t.wrapped.RoundTrip(req)
+}
+
+// laneClient is a client whose requests reach srv and carry name, standing in
+// for a sign-in through one Google project.
+func laneClient(srv *httptest.Server, name string, opts ...ClientOption) *Client {
+	c := NewClient(nil, opts...)
+	c.httpClient = &http.Client{Transport: &rewriteTransport{base: srv.URL, wrapped: laneHeader{name}}}
+	return c
+}
+
+type laneHeader struct{ name string }
+
+func (l laneHeader) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("X-Lane", l.name)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func TestGetMessageRawTakesTurnsAcrossQuotaLanesAndDropsARefusedOne(t *testing.T) {
+	var mu sync.Mutex
+	served := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lane := r.Header.Get("X-Lane")
+		if lane == "revoked" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		mu.Lock()
+		served[lane]++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "m", "raw": ""})
+	}))
+	defer srv.Close()
+
+	asked := 0
+	client := laneClient(srv, "main", WithQuotaLanes(func() []*Client {
+		asked++
+		switch asked {
+		case 1:
+			return []*Client{laneClient(srv, "second"), laneClient(srv, "revoked")}
+		case 2:
+			return []*Client{laneClient(srv, "late")}
+		}
+		return nil
+	}))
+	for range 7 {
+		_, err := client.GetMessageRaw(context.Background(), "m")
+		require.NoError(t, err)
+	}
+	// Turns: main, second, revoked (refused once, read by main, dropped), then main and second alternate.
+	assert.Equal(t, map[string]int{"main": 4, "second": 3}, served)
+
+	// A lane that becomes ready while the sync runs joins at the next ask.
+	client.lanesAsked = time.Time{}
+	for range 3 {
+		_, err := client.GetMessageRaw(context.Background(), "m")
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, served["late"])
+	assert.Equal(t, 10, client.concurrency)
 }

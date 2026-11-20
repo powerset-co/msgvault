@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,7 +46,20 @@ type Client struct {
 	logger      *slog.Logger
 	userID      string // "me" for authenticated user
 	concurrency int    // Max parallel requests for batch operations
+
+	// lanes are extra sign-ins to the same mailbox, each through its own Google
+	// project and so each with its own per-user quota. Raw message reads take
+	// turns across this client and its lanes.
+	lanesMu     sync.Mutex
+	lanes       []*Client
+	nextLane    int
+	newLanes    func() []*Client // lanes that became ready since the last ask
+	lanesAsked  time.Time
+	laneWorkers int // concurrency before any lane joined
 }
+
+// laneRefresh is how often a running sync asks for quota lanes that became ready.
+const laneRefresh = 30 * time.Second
 
 // ClientOption configures a Client.
 type ClientOption func(*Client)
@@ -61,6 +75,18 @@ func WithLogger(logger *slog.Logger) ClientOption {
 func WithConcurrency(n int) ClientOption {
 	return func(c *Client) {
 		c.concurrency = n
+	}
+}
+
+// WithQuotaLanes names where to get clients signed in to the same mailbox
+// through other Google projects. Raw message reads rotate across them; a lane
+// Google refuses is dropped for the rest of the run and its read goes to this
+// client. newLanes is asked at the first read and every laneRefresh after, and
+// returns only lanes it has not returned before, so a project set up while the
+// sync runs joins it.
+func WithQuotaLanes(newLanes func() []*Client) ClientOption {
+	return func(c *Client) {
+		c.newLanes = newLanes
 	}
 }
 
@@ -780,8 +806,59 @@ func (c *Client) listMessages(ctx context.Context, query, pageToken string, incl
 	}, nil
 }
 
-// GetMessageRaw fetches a single message with raw MIME data.
+// GetMessageRaw fetches a single message with raw MIME data, taking turns
+// across this client and its quota lanes.
 func (c *Client) GetMessageRaw(ctx context.Context, messageID string) (*RawMessage, error) {
+	lane := c.pickLane()
+	if lane == nil {
+		return c.getMessageRaw(ctx, messageID)
+	}
+	msg, err := lane.getMessageRaw(ctx, messageID)
+	if err == nil || ctx.Err() != nil {
+		return msg, err
+	}
+	if _, gone := errors.AsType[*NotFoundError](err); gone {
+		return nil, err
+	}
+	c.dropLane(lane, err)
+	return c.getMessageRaw(ctx, messageID)
+}
+
+// pickLane returns the next lane in turn, or nil when it is this client's turn.
+func (c *Client) pickLane() *Client {
+	c.lanesMu.Lock()
+	defer c.lanesMu.Unlock()
+	if c.newLanes != nil && time.Since(c.lanesAsked) >= laneRefresh {
+		c.lanesAsked = time.Now()
+		if c.laneWorkers == 0 {
+			c.laneWorkers = c.concurrency
+		}
+		c.lanes = append(c.lanes, c.newLanes()...)
+		// Ten requests at once carry about 12 raw reads a second, which held ten
+		// projects to 717 messages a minute where their pace allows 950.
+		c.concurrency = max(c.laneWorkers, 2*(len(c.lanes)+1))
+	}
+	turn := c.nextLane % (len(c.lanes) + 1)
+	c.nextLane++
+	if turn == 0 {
+		return nil
+	}
+	return c.lanes[turn-1]
+}
+
+func (c *Client) dropLane(lane *Client, cause error) {
+	c.lanesMu.Lock()
+	defer c.lanesMu.Unlock()
+	for i, l := range c.lanes {
+		if l == lane {
+			c.lanes = append(c.lanes[:i:i], c.lanes[i+1:]...)
+			c.logger.Warn("Gmail quota lane dropped for this run", "remaining", len(c.lanes), "error", cause)
+			return
+		}
+	}
+}
+
+func (c *Client) getMessageRaw(ctx context.Context, messageID string) (*RawMessage, error) {
 	path := fmt.Sprintf("/users/%s/messages/%s?format=raw", c.userID, messageID)
 	data, err := c.request(ctx, OpMessagesGetRaw, "GET", path, nil)
 	if err != nil {
@@ -849,7 +926,9 @@ func (c *Client) GetMessagesRawBatchWithErrors(ctx context.Context, messageIDs [
 	for i, id := range messageIDs {
 		results[i].ID = id
 	}
+	c.lanesMu.Lock()
 	sem := make(chan struct{}, c.concurrency)
+	c.lanesMu.Unlock()
 
 	g, ctx := errgroup.WithContext(ctx)
 
